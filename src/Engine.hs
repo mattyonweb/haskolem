@@ -8,6 +8,7 @@ import Data.List
 import Data.Maybe
 import Data.Char
 import Control.Monad
+import Control.Arrow
 import qualified Data.Set as Set
 
 data Expr =
@@ -237,32 +238,10 @@ fncRule4 e = e
 
 fncRules = [notNotRule, fncRule1, fncRule2, fncRule3, fncRule4]
 
+-------------------------------------------------------------
+-- Ora generiamo le clausole vere e proprie
 
--- isNegLit :: Expr -> Bool
--- isNegLit (Not e) = True
--- isNegLit _ = False
-
--- negateNegLit :: Expr -> Expr
--- negateNegLit (Not e) = e
--- negateNegLit _ = error "negateNegLit è andato storto"
-
--- isPosLit :: Expr -> Bool
--- isPosLit = not . isNegLit
-
--- getLiterals :: Expr -> Maybe Expr
--- getLiterals T = Just T
--- getLiterals F = Just F
--- getLiterals (V s) = Just (V s)
--- getLiterals (Func s args) = Just (Func s args)
--- getLiterals (Pred s args) = Just (Pred s args)
--- getLiterals (Not e) = case getLiterals e of
---   Just x -> Just (Not x)
---   Nothing -> Nothing  
--- getLiterals _ = Nothing
-
-del_dups :: Ord a => [a] -> [a]
-del_dups = Set.toList . Set.fromList
-
+isLit :: Expr -> Bool
 isLit T = True
 isLit F = True
 isLit (V _) = True
@@ -271,6 +250,8 @@ isLit (Pred _ _) = True
 isLit (Not e) = isLit e
 isLit _ = False
 
+
+-- Genera la clausola per una disgiunzione
 genDisjClaus :: Expr -> Clause
 genDisjClaus (Or e1 e2) = Clause (n1 ++ n2) (p1 ++ p2)
   where (Clause n1 p1) = genDisjClaus e1 
@@ -284,31 +265,40 @@ genDisjClaus t =
   then error "Prevista FNC ma trovata espressione non in FNC"
   else Clause [] [t]
 
-       
+
+-- Crea le clausole di una espressione qualsiasi
 genClaus :: Expr -> [Clause]
 genClaus (And e1 e2) = genClaus e1 ++ genClaus e2
 genClaus e = [genDisjClaus e]
 
-
+-- Pretty printing
 pprintClauses :: [Clause] -> IO ()
 pprintClauses cs = mapM_ print $ cs
 
+-------------------------------------------------------------
+-- Ottimizzazioni sulle clausole.
+
+-- Δ ⇒ Δ è ridondante
 opt1 :: Clause -> Bool
 opt1 (Clause n p) = n /= p
 
+-- Riordina i letterali per effettuare ottimizazioni (cfr. opt1)
 opt2 :: Clause -> Clause
 opt2 (Clause n p) = Clause (Set.toList $ Set.fromList n)
                            (Set.toList $ Set.fromList p)
 
+-- Δ,A ⇒ Γ,A ≡ A ⇒ A che è tautologia
 opt3 :: Clause -> Bool
 opt3 (Clause n p) = [] == intersect n p
 
+-- Altre tautologie
 opt4 :: Clause -> Bool
 opt4 (Clause [] [T]) = False
 opt4 (Clause [F] []) = False
 opt4 _ = True
 
-optz' = [
+
+ottimizzazioni = [
     filter opt3
   , (Set.toList . Set.fromList)
   , filter opt1
@@ -316,9 +306,14 @@ optz' = [
   , filter opt1
   ]
 
+-- Coq
 mapi :: (a -> Int -> b) -> [a] -> [b]
 mapi f l = map (uncurry f) (zip l [0..])
 
+
+-- Lift IO per le funzioni di ottimizzazione su clausole;
+-- Sembra complicata, in realtà è solo un po' di testo carino
+-- e scritte informative
 liftOptzs :: (Show a, Eq a) => String -> (a -> a) -> (a -> IO a)  
 liftOptzs name f = \a -> do
   putStrLn $ name ++ ":"
@@ -329,28 +324,20 @@ liftOptzs name f = \a -> do
       putStrLn $ "\tInput:  " ++ show a ;
       putStrLn $ "\tResult: " ++ show result ;
       return result
-  
-optz = foldl (.) id optz'
-optzIO' = foldl (>=>) return $
-  mapi (\foo i -> liftOptzs ("Optim." ++ show i) foo) optz'
 
 
-ex5 =
-  Forall (V "x")
-    (Exists (V "y")
-      (Or
-         (And (And (V "x") (Not (V "x"))) (cost "c"))
-         (Exists (V "z") (And (And (V "y") (Not (V "y"))) (V "z")))))
+-- Non usato in pratica, più bello usare IO
+optz :: [Clause] -> [Clause]  
+optz = foldl (.) id ottimizzazioni
 
--- skolem :: Expr -> [Clause]
--- skolem =
---   myFix firstRules >>>
---   myFix (pushOutRules ++ firstRules) >>>
---   skolemRec [] >>>
---   myFix fncRules >>>
---   genClaus >>>
---   optz 
+-- Fa un "merge" di tutte le ottimizazioni in un'unica funzione
+-- che stampa utili informazioni di debug in IO
+optzIO :: [Clause] -> IO [Clause]
+optzIO = foldl (>=>) return $
+  mapi (\foo i -> liftOptzs ("Optim." ++ show i) foo) ottimizzazioni
 
+
+-- Versione più generica di liftOptzs ma sostanzialmente simile.
 liftDebug :: (Show a, Show b) => String -> (a -> b) -> (a -> IO b)
 liftDebug stepName f = \a -> do
   putStrLn $ stepName ++ ":"
@@ -366,7 +353,7 @@ skolemIO =
   liftDebug "Verso FNCongiuntiva" (myFix fncRules) >=>
   liftDebug "FNC" genClaus >=>
   liftDebug "Riduzioni" optz >=>
-  optzIO'
+  optzIO
 
 skolemMultipleIO :: [Expr] -> IO [Clause] 
 skolemMultipleIO es = do
@@ -375,7 +362,6 @@ skolemMultipleIO es = do
 
 
 -------------------------------------------------------------
-
 
 solverIO =
   skolemIO >=>
@@ -400,8 +386,9 @@ attemptSolution xs =
     Nothing -> Unknown "a"
     Just _  -> NonSAT
 
--- -------------------------------------------------------------
 
+-- -------------------------------------------------------------
+-- Da qui in poi sperimentale
 resFatt :: Clause -> Clause -> Clause
 resFatt (Clause n1 p1) (Clause n2 p2) =
   Clause (fatt $ del_n1 ++ del_n2) (fatt $ del_p1 ++ del_p2)
