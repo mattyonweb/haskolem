@@ -1,0 +1,5 @@
+hyp
+Forall x(Exists y(x&y))
+
+hyp
+Exists y(y|~y)
